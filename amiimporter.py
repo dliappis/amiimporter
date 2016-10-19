@@ -65,7 +65,7 @@ def vbox_to_vmdk(p):
         print("Reported error is: {}".format(errVal))
         sys.exit(1)
     except IndexError:
-        print("Found more tha one .vmdk files after extracting {}".format(p.vboxfile))
+        print("Found more than one .vmdk files after extracting {}".format(p.vboxfile))
         sys.exit(1)
 
     return "{}/{}".format(p.tempdir, vmdkfile)
@@ -158,7 +158,7 @@ def import_s3key_to_ami(p):
         import_progress_resp = json.loads(subprocess.check_output(aws_import_status_cmd))['ImportImageTasks'][0]
         if 'Progress' not in import_progress_resp.keys() and 'ImageId' in import_progress_resp.keys():
             temporary_ami = import_progress_resp['ImageId']
-            logging.info("Done, amiid is {}".format(temporary_ami))
+            logging.info("Done, ami-id is {}".format(temporary_ami))
             break
         else:
             import_progress = import_progress_resp['Progress']
