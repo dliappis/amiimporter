@@ -14,8 +14,10 @@ import sys
 import time
 import threading
 
-AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+
+from distutils.version import StrictVersion
+
+__MIN_BOTO3_VER = "1.4.1"
 
 
 # From http://boto3.readthedocs.io/en/latest/_modules/boto3/s3/transfer.html
@@ -39,13 +41,19 @@ class ProgressPercentage(object):
                 sys.stdout.flush()
 
 
+def check_versions():
+    if StrictVersion(boto3.__version__) < StrictVersion(__MIN_BOTO3_VER):
+        logging.error("Your boto3 python library is older than {}. Please upgrade.}.format(__MIN_BOTO3_VER)")
+        sys.exit(1)
+
+
 def make_opt_parser():
     p = argparse.ArgumentParser(description='Import virtualbox vagrant box as AWS AMI')
     p.add_argument('--region', default='eu-central-1')
     p.add_argument('--s3bucket', help='s3bucket', required=True)
     p.add_argument('--s3key',
                    help='s3key e.g. centos-6-hvm-20160125111111'
-                   'if ommited your vboxfile must look like e.g. centos6.7-20160101111111')
+                   'if omitted your vboxfile must look like e.g. centos6.7-20160101111111')
     p.add_argument('--vboxfile',
                    required=True,
                    help='The vagrant box name.')
@@ -230,6 +238,7 @@ def parse_vbox_name(vboxname):
 def main(opts):
     if opts.verbose:
         logging.basicConfig(level=logging.INFO)
+    check_versions()
     cleanup_temp_dir(opts)
     vmdkfile = vbox_to_vmdk(opts)
     upload_vmdk_to_s3(opts, vmdkfile)
