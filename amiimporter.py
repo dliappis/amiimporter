@@ -1,16 +1,42 @@
 #!/usr/bin/env python
+from __future__ import print_function
 
 import argparse
-import boto
+import botocore
+import boto3
 import json
 import logging
 import os
+import pdb
 import re
 import subprocess
 import sys
 import time
-from boto.s3.key import Key
-from boto import ec2
+import threading
+
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+
+
+# From http://boto3.readthedocs.io/en/latest/_modules/boto3/s3/transfer.html
+class ProgressPercentage(object):
+        def __init__(self, filename):
+            self._filename = filename
+            self._size = float(os.path.getsize(filename))
+            self._seen_so_far = 0
+            self._lock = threading.Lock()
+
+        def __call__(self, bytes_amount):
+            with self._lock:
+                self._seen_so_far += bytes_amount
+                percentage = (self._seen_so_far / self._size) * 100
+                print("{}  {} / {}  {:.2f}%%                                                \r".format(
+                    self._filename,
+                    self._seen_so_far,
+                    self._size,
+                    percentage),
+                      end='\r')
+                sys.stdout.flush()
 
 
 def make_opt_parser():
@@ -79,6 +105,7 @@ def upload_vmdk_to_s3(p, vmdkfile):
         sys.stdout.flush()
 
     logging.info("Uploading {} to s3".format(vmdkfile))
+
     # boto2 doesn't have import-image yet; use aws cli command until we switch to boto3
     if not p.s3key:
         (osname, osver, creationdate) = parse_vbox_name(os.path.basename(p.vboxfile))
@@ -86,40 +113,31 @@ def upload_vmdk_to_s3(p, vmdkfile):
         p.s3key = s3file
     else:
         s3file = p.s3key
-    AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
-    AWS_SECRET_ACCESS_KEY_ID = os.environ.get('AWS_SECRET_ACCESS_KEY_ID')
 
-    s3conn = boto.connect_s3(AWS_ACCESS_KEY_ID,
-                             AWS_SECRET_ACCESS_KEY_ID)
+    client = boto3.client('s3', config=botocore.client.Config(signature_version='s3v4'))
 
-    bucket = s3conn.get_bucket(p.s3bucket, validate=False)  # see https://github.com/boto/boto/issues/2741
-    bucket_location = bucket.get_location()
+    bucket_location = client.get_bucket_location(Bucket=p.s3bucket)
     if bucket_location:
-        conn = boto.s3.connect_to_region(bucket_location)
-        p.region = bucket_location
-        bucket = conn.get_bucket(p.s3bucket)
+        p.region = bucket_location['LocationConstraint']
     # TODO check if key exists in bucket
-    s3key = Key(bucket)
-    s3key.key = s3file
-    s3key.set_contents_from_filename(vmdkfile, cb=percent_cb, num_cb=10)
+    try:
+        with open(vmdkfile, 'rb') as data:
+            client.upload_fileobj(data, p.s3bucket, s3file, Callback=ProgressPercentage(vmdkfile))
+    except botocore.exceptions.ClientError as e:
+        print("Error {}".format(e))
+        sys.exit(1)
 
 
 def delete_s3key(p):
-    AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
-    AWS_SECRET_ACCESS_KEY_ID = os.environ.get('AWS_SECRET_ACCESS_KEY_ID')
-
-    s3conn = boto.connect_s3(AWS_ACCESS_KEY_ID,
-                             AWS_SECRET_ACCESS_KEY_ID)
-    bucket = s3conn.get_bucket(p.s3bucket, validate=False)  # see https://github.com/boto/boto/issues/2741
-    bucket_location = bucket.get_location()
+    client = boto3.client('s3', config=botocore.client.Config(signature_version='s3v4'))
+    bucket_location = client.get_bucket_location(Bucket=p.s3bucket)
     if bucket_location:
-        conn = boto.s3.connect_to_region(bucket_location)
-        p.region = bucket_location
-        bucket = conn.get_bucket(p.s3bucket)
-    s3key = Key(bucket)
-    s3key.key = p.s3key
-    logging.info("Deleting updateded s3 file s3://{}/{}".format(p.s3bucket, p.s3key))
-    bucket.delete_key(s3key)
+        p.region = bucket_location['LocationConstraint']
+    logging.info("Deleting uploaded s3 file s3://{}/{}".format(p.s3bucket, p.s3key))
+    client.delete_object(
+        Bucket=p.s3bucket,
+        Key=p.s3key,
+    )
 
 
 def import_s3key_to_ami(p):
@@ -170,14 +188,23 @@ def import_s3key_to_ami(p):
     # import-image created randon name and description. Those can't be modified.
     # Create copies for all regions with the right metadata instead.
     amis_created = {}
-    for region in ['eu-central-1', 'us-west-2', 'us-east-1']:
-        ec2conn = ec2.connect_to_region(region)
-        amis_created[region] = ec2conn.copy_image(p.region, temporary_ami, name=p.s3key, description=p.s3key)
-        print "Created {} in region {}".format(amis_created[region].image_id, region)
+    client = {}
+    for dest_region in ['eu-central-1', 'us-west-2', 'us-east-1', 'us-east-2']:
+        client[dest_region] = boto3.client('ec2', region_name=dest_region)
+        amis_created[dest_region] = client[dest_region].copy_image(
+            SourceRegion=p.region,
+            SourceImageId=temporary_ami,
+            Name=p.s3key,
+            Description=p.s3key
+        )
+        # amis_created[region] = ec2conn.copy_image(p.region, temporary_ami, name=p.s3key, description=p.s3key)
+        print("Created {} in region {}".format(amis_created[dest_region]['ImageId'], dest_region))
 
     logging.info("Deregistering temporary AMI {}".format(temporary_ami))
-    ec2conn = ec2.connect_to_region(p.region)
-    ec2conn.deregister_image(temporary_ami)
+    client = boto3.client('ec2', region_name=p.region)
+    client.deregister_image(ImageId=temporary_ami)
+    # ec2conn = ec2.connect_to_region(p.region)
+    # ec2conn.deregister_image(temporary_ami)
 
 
 def parse_vbox_name(vboxname):
